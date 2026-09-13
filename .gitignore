@@ -1,0 +1,25 @@
+.DS_Store
+*.log
+.local/
+.rail-install-backup.*/
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# 构建出的应用包
+dist/
+*.app
+
+# rail install output — per-checkout, run ./.bin/rail init again in each new worktree
+/.agents/
+/.bin/
+/.claude/skills/
+/.claude/hooks/
+/.claude/settings.json
+
+# Agent worktrees
+.claude/worktrees/

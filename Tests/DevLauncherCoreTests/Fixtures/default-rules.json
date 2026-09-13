@@ -1,0 +1,122 @@
+{
+  "rules" : [
+    {
+      "actions" : [
+        {
+          "applicationName" : "Finder",
+          "targetTemplate" : "{{匹配内容}}",
+          "title" : "在 Finder 中显示",
+          "type" : "openWithApplication"
+        },
+        {
+          "applicationName" : "iTerm2",
+          "targetTemplate" : "{{匹配内容}}",
+          "title" : "在 iTerm2 中打开",
+          "type" : "openWithApplication"
+        },
+        {
+          "title" : "Claude Code 终端",
+          "type" : "openURL",
+          "urlTemplate" : "claude-cli://open?cwd=$0"
+        },
+        {
+          "title" : "Claude Code 桌面",
+          "type" : "openURL",
+          "urlTemplate" : "claude://code/new?folder=$0"
+        },
+        {
+          "title" : "Codex 桌面",
+          "type" : "openURL",
+          "urlTemplate" : "codex://threads/new?path=$0"
+        }
+      ],
+      "condition" : {
+        "group" : {
+          "children" : [
+            {
+              "predicate" : {
+                "caseInsensitive" : false,
+                "field" : "text",
+                "id" : "00000000-0000-4000-8000-000000000101",
+                "operation" : "matchesRegularExpression",
+                "value" : "^(?:/|~/).+$"
+              },
+              "type" : "predicate"
+            },
+            {
+              "predicate" : {
+                "caseInsensitive" : false,
+                "field" : "fileExists",
+                "id" : "00000000-0000-4000-8000-000000000102",
+                "operation" : "isTrue",
+                "value" : "true"
+              },
+              "type" : "predicate"
+            },
+            {
+              "predicate" : {
+                "caseInsensitive" : false,
+                "field" : "fileKind",
+                "id" : "00000000-0000-4000-8000-000000000103",
+                "operation" : "equals",
+                "value" : "directory"
+              },
+              "type" : "predicate"
+            }
+          ],
+          "combinator" : "all",
+          "id" : "00000000-0000-4000-8000-000000000100"
+        },
+        "type" : "group"
+      },
+      "enabled" : true,
+      "id" : "builtin.local-path",
+      "name" : "本地文件夹"
+    },
+    {
+      "actions" : [
+        {
+          "title" : "在 Linear 打开",
+          "type" : "openURL",
+          "urlTemplate" : "https://linear.app/EXAMPLE-WORKSPACE/issue/$0"
+        }
+      ],
+      "condition" : {
+        "predicate" : {
+          "caseInsensitive" : true,
+          "field" : "text",
+          "id" : "00000000-0000-4000-8000-000000000201",
+          "operation" : "matchesRegularExpression",
+          "value" : "^(EXAMPLE)-([0-9]+)$"
+        },
+        "type" : "predicate"
+      },
+      "enabled" : false,
+      "id" : "builtin.linear-issue",
+      "name" : "Linear issue（填好 workspace 与 team key 后启用）"
+    },
+    {
+      "actions" : [
+        {
+          "issueURLTemplate" : "https://github.com/$repo/issues/$1",
+          "title" : "选一个 repo 打开 issue",
+          "type" : "repoPicker"
+        }
+      ],
+      "condition" : {
+        "predicate" : {
+          "caseInsensitive" : false,
+          "field" : "text",
+          "id" : "00000000-0000-4000-8000-000000000301",
+          "operation" : "matchesRegularExpression",
+          "value" : "^#([0-9]+)$"
+        },
+        "type" : "predicate"
+      },
+      "enabled" : true,
+      "id" : "builtin.github-issue-number",
+      "name" : "GitHub #N"
+    }
+  ],
+  "version" : 3
+}
