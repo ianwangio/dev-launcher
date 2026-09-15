@@ -1,6 +1,8 @@
 import Foundation
 
 public enum RepoRanker {
+  private static let maximumRecommendationDistance = 3
+
   public static func mostRecentlyUpdated(
     _ repositories: [GitHubRepository], limit: Int? = nil
   ) -> [GitHubRepository] {
@@ -14,7 +16,8 @@ public enum RepoRanker {
     return Array(sorted.prefix(max(0, limit)))
   }
 
-  /// 对指定编号，优先选择最新 PR 编号覆盖且最接近的仓库；再结合使用历史、推送时间和名称。
+  /// 对指定编号，按最新 PR 编号的绝对距离排序；等距时再结合使用历史、推送时间和名称。
+  /// 只有距离足够近的首位候选才应显示为推荐。
   public static func rank(
     _ repositories: [GitHubRepository],
     history: [HistoryEntry],
@@ -44,16 +47,18 @@ public enum RepoRanker {
   }
 
   public static func isRecommended(_ repository: GitHubRepository, for referenceNumber: Int) -> Bool {
-    recommendationDistance(repository, referenceNumber: referenceNumber) < Int.max
+    recommendationDistance(repository, referenceNumber: referenceNumber)
+      <= maximumRecommendationDistance
   }
 
   private static func recommendationDistance(
     _ repository: GitHubRepository,
     referenceNumber: Int
   ) -> Int {
-    guard let latest = repository.latestPullRequestNumber, latest >= referenceNumber else {
+    guard let latest = repository.latestPullRequestNumber else {
       return Int.max
     }
-    return latest - referenceNumber
+    if latest >= referenceNumber { return latest - referenceNumber }
+    return referenceNumber - latest
   }
 }

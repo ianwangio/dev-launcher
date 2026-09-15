@@ -96,8 +96,8 @@ func repositoryRanking() {
   #expect(ranked.map(\.nameWithOwner) == ["org/used", "org/a", "org/z"])
 }
 
-@Test("复制编号时优先推荐最新 PR 编号覆盖且最接近的仓库")
-func repositoryRecommendationUsesLatestPRNumber() {
+@Test("复制编号时按最新 PR 编号的绝对距离排列仓库")
+func repositoryRecommendationUsesAbsolutePRNumberDistance() {
   let repositories = [
     GitHubRepository(nameWithOwner: "org/too-small", latestPullRequestNumber: 39),
     GitHubRepository(nameWithOwner: "org/far", latestPullRequestNumber: 300),
@@ -105,9 +105,57 @@ func repositoryRecommendationUsesLatestPRNumber() {
     GitHubRepository(nameWithOwner: "org/unknown"),
   ]
   let ranked = RepoRanker.rank(repositories, history: [], referenceNumber: 42)
-  #expect(ranked.map(\.nameWithOwner) == ["org/closest", "org/far", "org/too-small", "org/unknown"])
+  #expect(ranked.map(\.nameWithOwner) == ["org/closest", "org/too-small", "org/far", "org/unknown"])
   #expect(RepoRanker.isRecommended(ranked[0], for: 42))
+  #expect(RepoRanker.isRecommended(ranked[1], for: 42))
   #expect(RepoRanker.isRecommended(ranked[2], for: 42) == false)
+}
+
+@Test("#272 在缓存落后一位时仍推荐 ArgoCD Config")
+func repositoryRecommendationHandlesStalePRMetadata() {
+  let repositories = [
+    GitHubRepository(nameWithOwner: "maxgent-ai/maxgent", latestPullRequestNumber: 5293),
+    GitHubRepository(nameWithOwner: "maxgent-ai/maxgent-terraform", latestPullRequestNumber: 268),
+    GitHubRepository(nameWithOwner: "maxgent-ai/argocd-config", latestPullRequestNumber: 271),
+  ]
+
+  let ranked = RepoRanker.rank(repositories, history: [], referenceNumber: 272)
+
+  #expect(ranked.map(\.nameWithOwner) == [
+    "maxgent-ai/argocd-config",
+    "maxgent-ai/maxgent-terraform",
+    "maxgent-ai/maxgent",
+  ])
+  #expect(RepoRanker.isRecommended(ranked[0], for: 272))
+}
+
+@Test("仓库推荐距离以三为边界")
+func repositoryRecommendationUsesConfidenceThreshold() {
+  #expect(RepoRanker.isRecommended(
+    GitHubRepository(nameWithOwner: "org/within", latestPullRequestNumber: 269),
+    for: 272))
+  #expect(RepoRanker.isRecommended(
+    GitHubRepository(nameWithOwner: "org/outside", latestPullRequestNumber: 268),
+    for: 272) == false)
+  #expect(RepoRanker.isRecommended(
+    GitHubRepository(nameWithOwner: "org/unknown"),
+    for: 272) == false)
+}
+
+@Test("绝对距离相同时优先最近使用的仓库")
+func repositoryRecommendationBreaksDistanceTieWithHistory() {
+  let repositories = [
+    GitHubRepository(nameWithOwner: "org/above", latestPullRequestNumber: 45),
+    GitHubRepository(nameWithOwner: "org/below", latestPullRequestNumber: 39),
+  ]
+  let ranked = RepoRanker.rank(
+    repositories,
+    history: [HistoryEntry(
+      ruleID: "r", actionIndex: 0, repo: "org/below", number: 39,
+      openedAt: Date(timeIntervalSince1970: 300))],
+    referenceNumber: 42)
+
+  #expect(ranked.map(\.nameWithOwner) == ["org/below", "org/above"])
 }
 
 @Test("GitHub repoPicker 展开成真实仓库候选并保留排序元数据")
@@ -117,7 +165,7 @@ func repositoryPickerCandidates() throws {
     urlOpener: FakeURLOpener(handlers: ["https": "Browser"]),
     fileSystem: fs,
     interpreters: InterpreterResolver(runner: FakeCommandRunner(), fileSystem: fs, loginShell: "/bin/zsh"),
-    repositories: [GitHubRepository(nameWithOwner: "openai/codex", latestPullRequestNumber: 88)]
+    repositories: [GitHubRepository(nameWithOwner: "openai/codex", latestPullRequestNumber: 43)]
   )
   let candidates = resolver.candidates(
     for: Matcher.match(text: "#42", rules: [BuiltinRules.githubIssueNumber]))
@@ -127,6 +175,27 @@ func repositoryPickerCandidates() throws {
   #expect(candidate.icon == .application(name: "GitHub Desktop"))
   #expect(candidate.detail.contains("推荐"))
   #expect(candidate.plan == .open(url: "https://github.com/openai/codex/issues/42"))
+}
+
+@Test("GitHub repoPicker 不为距离过大的首位候选显示推荐")
+func repositoryPickerOmitsLowConfidenceRecommendation() throws {
+  let fs = FakeFileSystem()
+  let resolver = ActionResolver(
+    urlOpener: FakeURLOpener(handlers: ["https": "Browser"]),
+    fileSystem: fs,
+    interpreters: InterpreterResolver(
+      runner: FakeCommandRunner(), fileSystem: fs, loginShell: "/bin/zsh"),
+    repositories: [GitHubRepository(
+      nameWithOwner: "maxgent-ai/maxgent", latestPullRequestNumber: 5293)]
+  )
+
+  let candidates = resolver.candidates(
+    for: Matcher.match(text: "#272", rules: [BuiltinRules.githubIssueNumber]))
+  let candidate = try #require(candidates.first)
+
+  #expect(candidate.repository == "maxgent-ai/maxgent")
+  #expect(candidate.detail.contains("推荐") == false)
+  #expect(candidate.detail.contains("最新 PR #5293"))
 }
 
 @Test("Linear 配置生成正确匹配和网页链接")

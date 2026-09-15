@@ -29,7 +29,7 @@ swift test
 - `BoundaryTests.swift` 里的 B2–B10 —— 架构边界的机械检查，越界即红，失败信息带文件和行号；
 - `Scripts/build-app.sh` 打包前也先跑它，不过就不产出 `.app`。
 
-没有 CI（本仓库不推 GitHub），所以检查不能散成一堆要人记得跑的脚本，只能有这一个入口。
+本仓库通过公开 GitHub Release 分发应用，目前没有 CI。检查不能散成一堆要人记得跑的脚本，只能有 `swift test` 这一个入口；`Scripts/package-release.sh` 通过 `build-app.sh` 调用它。
 
 ### 改代码前要知道的三条
 

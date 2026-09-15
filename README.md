@@ -3,13 +3,32 @@
 macOS 原生应用。常驻后台监听剪贴板，内容匹配上规则时在鼠标附近弹出候选面板，
 点击候选项才执行动作 —— 用默认浏览器打开 URL，或用本机解释器跑一个脚本。
 
-自用工具：不签名、不公证、不上架、不做自动更新，只在本机跑。
+公开发布的自用工具：应用包使用临时签名，未获 Developer ID 签名或公证；不做自动更新。
 
-## 跑起来
+## 直接下载
+
+需要 **macOS 26、Apple Silicon（arm64）**。从 [最新 Release](https://github.com/ianwangio/dev-launcher/releases/latest) 下载 `DevLauncher-v0.1.0-macos-arm64.zip` 和 `SHA256SUMS.txt`。GitHub 页面上的 `Source code (zip)` 只是源码，不能直接运行。
+
+把两个下载文件放在同一目录，先核对下载包：
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+解压 ZIP，把 `DevLauncher.app` 移到“应用程序”。此版未公证；确认下载来源和摘要后，在终端**只对这个应用**执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/DevLauncher.app
+open /Applications/DevLauncher.app
+```
+
+若把应用放在别的位置，替换命令中的应用路径。此命令不关闭 macOS 的全局安全设置。升级时先退出应用，再用新版本 `.app` 替换旧版本；规则、设置和历史保留在自己的 `~/Library/Application Support/DevLauncher/`。发布者流程见 [Release 文档](docs/release.md)。
+
+## 从源码运行
 
 ```bash
 swift build            # 编译
-swift test             # 38 个测试，含 9 条边界检查
+swift test             # 单测与架构边界检查的唯一入口
 Scripts/build-app.sh   # 先跑测试，再组装 dist/DevLauncher.app
 open dist/DevLauncher.app
 ```
@@ -74,40 +93,26 @@ URL 模板里代入的值会做百分号编码；脚本参数不编码（它们�
 |---|---|---|
 | `openURL` | `urlTemplate` | 展开后交给系统默认应用 |
 | `runScript` | `scriptPath` `args` | 按 shebang 或扩展名选解释器执行 |
-| `repoPicker` | `issueURLTemplate` | 列出 GitHub repo 供选择（尚未接入，见下） |
+| `repoPicker` | `issueURLTemplate` | 从已刷新仓库列表选择 GitHub repo 并打开对应编号 |
 
 Linear API key 存 Keychain（service `DevLauncher`），不进任何 JSON。
 
 ## 目录
 
 ```
-Sources/DevLauncherCore/   纯逻辑。不 import SwiftUI / AppKit，副作用全部经 Port 注入。
-  Contract/   Rule Action RuleSet Settings Candidate —— 规则 schema 的唯一真相
-  Ports/      七个协议：CommandRunner HTTPClient FileSystem Clock SecretStore URLOpener PasteboardSource
-  Matching/   Matcher TemplateExpander ClipboardGate
-  Actions/    ActionResolver InterpreterResolver
-  GitHub/     ExecutablePathFilter GhPathResolver
-  Storage/    Store History
-  Presets/    BuiltinRules
-Sources/DevLauncherApp/    界面与系统交互。
-  Adapters/   七个 Port 的真实实现 + SystemPaths / FinderRevealer
-  Panel/      PanelController（NSPanel）PanelView
-  Main/       AppModel MainWindowView
-Tests/DevLauncherCoreTests/
-  CoreTests.swift       27 个单测
-  BoundaryTests.swift   B2–B10 边界检查
-  IntegrationTests.swift 真实调用本机 gh，默认跳过
-  Fixtures/             B6 金样本
+Sources/DevLauncherCore/   纯逻辑、规则契约、匹配、动作、GitHub 与存储。
+Sources/DevLauncherApp/    界面、系统交互与副作用适配器。
+Tests/DevLauncherCoreTests/ 单测、BoundaryTests.swift 架构检查和可选的真实 gh 集成测试。
+Scripts/build-app.sh      测试、编译并组装本机 .app。
+Scripts/package-release.sh 从干净提交制作 Release ZIP 和摘要。
+docs/release.md            发布者流程。
 ```
 
 依赖方向只有 App → Core。反过来写会让 `swift build` 报 target 循环依赖。
 
-## 本期没做的
+## 暂未提供
 
-- **GitHub `#N` 选 repo**：`repoPicker` 动作类型在 schema 里是完整的，面板上也会出现，
-  但置灰并写明原因 —— 取 repo 列表（`gh`）和按编号邻近度排序还没接。
-- **规则的图形化编辑**：改 `rules.json` 再点「重新载入规则」。
-- **AI 动作类型**：本期明确不做，是将来的一种动作类型。
+Developer ID 公证、Intel 构建、自动更新和 AI 动作类型。
 
 ## 给 agent 的说明
 
