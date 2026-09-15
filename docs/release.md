@@ -35,12 +35,14 @@ Scripts/package-release.sh v0.1.0
 
 ```bash
 GH_TOKEN="$(gh auth token --user ianwangio)" gh repo create ianwangio/dev-launcher --public --source=. --remote=origin
-git push -u origin main
+GH_TOKEN="$(gh auth token --user ianwangio)" git -c credential.helper= \
+  -c 'credential.helper=!gh auth git-credential' push -u origin main
 git tag -a v0.1.0 -m "DevLauncher v0.1.0"
-git push origin v0.1.0
+GH_TOKEN="$(gh auth token --user ianwangio)" git -c credential.helper= \
+  -c 'credential.helper=!gh auth git-credential' push origin v0.1.0
 ```
 
-若公开仓库已存在，跳过创建，先检查 `git remote -v` 是否精确指向 `https://github.com/ianwangio/dev-launcher.git`。若标签已存在，先检查 `git rev-list -n 1 v0.1.0` 与打包提交一致，不重写已发布标签。发布者必须核对 GitHub 上 `main` 和 `v0.1.0` 都指向预期源码；不要把之后仅记录 `rail` 事件的提交误当应用源码。
+这两条推送命令只在当次调用中覆盖 Git 的凭据助手，使用 `ianwangio` 的现有 `gh` 登录；不会把 token 写入远端 URL 或改变全局 Git 配置。本机默认的 `connector-cli` 凭据助手若未获该公开仓库安装授权，会拦截普通 `git push`。若公开仓库已存在，跳过创建，先检查 `git remote -v` 是否精确指向 `https://github.com/ianwangio/dev-launcher.git`。若标签已存在，先检查 `git rev-list -n 1 v0.1.0` 与打包提交一致，不重写已发布标签。发布者必须核对 GitHub 上 `main` 和 `v0.1.0` 都指向预期源码；不要把之后仅记录 `rail` 事件的提交误当应用源码。
 
 ## 4. 创建 Release
 
