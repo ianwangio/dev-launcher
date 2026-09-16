@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 APP="$ROOT/dist/DevLauncher.app"
-VERSION="0.1.0"
+VERSION="0.1.1"
 BUNDLE_ID="io.ianwang.DevLauncher"
 ICON_SOURCE="$ROOT/Assets/DevLauncher-AppIcon-1024.png"
 ICONSET="$ROOT/.build/DevLauncher.iconset"

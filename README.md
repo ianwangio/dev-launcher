@@ -7,7 +7,7 @@ macOS 原生应用。常驻后台监听剪贴板，内容匹配上规则时在�
 
 ## 直接下载
 
-需要 **macOS 26、Apple Silicon（arm64）**。从 [最新 Release](https://github.com/ianwangio/dev-launcher/releases/latest) 下载 `DevLauncher-v0.1.0-macos-arm64.zip` 和 `SHA256SUMS.txt`。GitHub 页面上的 `Source code (zip)` 只是源码，不能直接运行。
+需要 **macOS 26、Apple Silicon（arm64）**。当前公开 Release 是 `v0.1.0`；从 [最新 Release](https://github.com/ianwangio/dev-launcher/releases/latest) 下载 `DevLauncher-v0.1.0-macos-arm64.zip` 和 `SHA256SUMS.txt`。GitHub 页面上的 `Source code (zip)` 只是源码，不能直接运行。
 
 把两个下载文件放在同一目录，先核对下载包：
 
@@ -94,6 +94,11 @@ URL 模板里代入的值会做百分号编码；脚本参数不编码（它们�
 | `openURL` | `urlTemplate` | 展开后交给系统默认应用 |
 | `runScript` | `scriptPath` `args` | 按 shebang 或扩展名选解释器执行 |
 | `repoPicker` | `issueURLTemplate` | 从已刷新仓库列表选择 GitHub repo 并打开对应编号 |
+
+GitHub 仓库数据采用 stale-while-revalidate：任何可解码的本地缓存都会先用于候选列表，
+不会因为联网刷新阻塞界面；缓存的陈旧阈值为 7 天。应用运行时每 24 小时在后台刷新一次，
+该定时任务只查询并更新“集成”页已勾选的仓库。页面上的“刷新/重新检测”仍执行全量账号、
+Organization 和仓库发现，用于找到新仓库；首次运行没有缓存时也会后台完成一次全量发现。
 
 Linear API key 存 Keychain（service `DevLauncher`），不进任何 JSON。
 

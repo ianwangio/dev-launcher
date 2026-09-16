@@ -49,6 +49,7 @@ final class AppModel {
 
   private var clipboardPipeline: ClipboardPipeline
   private var pollTimer: Timer?
+  private var repositoryRefreshTimer: Timer?
 
   // MARK: 构造
 
@@ -147,13 +148,22 @@ final class AppModel {
       self?.activate(candidate)
     })
     warmUpInterpreters()
-    refreshIntegrations(force: false)
+    if let cached = repositoryProvider.cachedRepositories() {
+      applyRepositorySnapshot(cached)
+      refreshScriptEnvironments()
+      scheduleSelectedRepositoryRefresh(
+        after: cached.selectedRefreshAttemptedAt ?? cached.fetchedAt)
+    } else {
+      refreshIntegrations(force: true)
+    }
     startPolling()
   }
 
   func stop() {
     pollTimer?.invalidate()
     pollTimer = nil
+    repositoryRefreshTimer?.invalidate()
+    repositoryRefreshTimer = nil
     panel?.hide()
   }
 
@@ -613,26 +623,85 @@ final class AppModel {
     isRefreshingIntegrations = true
     repositoryError = nil
     let provider = repositoryProvider
-    let runner = self.runner
-    let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    refreshScriptEnvironments()
     Task.detached(priority: .utility) {
-      let environments = Self.detectScriptEnvironments(runner: runner, shell: shell)
-      await MainActor.run { self.scriptEnvironments = environments }
       do {
         let snapshot = try await provider.repositories(
           policy: force ? .reloadIgnoringCache : .useCache)
         await MainActor.run {
-          self.repositorySnapshot = snapshot
-          self.initializeRepositorySelectionIfNeeded(from: snapshot)
+          self.applyRepositorySnapshot(snapshot)
           self.repositoryError = nil
           self.isRefreshingIntegrations = false
-          self.rebuildResolver()
+          self.scheduleSelectedRepositoryRefresh(
+            after: snapshot.selectedRefreshAttemptedAt ?? snapshot.fetchedAt)
         }
       } catch {
         await MainActor.run {
           self.repositoryError = Self.repositoryErrorMessage(error)
           self.isRefreshingIntegrations = false
           self.rebuildResolver()
+          if self.repositorySnapshot != nil {
+            self.scheduleSelectedRepositoryRefresh(after: self.clock.now)
+          }
+        }
+      }
+    }
+  }
+
+  private func refreshScriptEnvironments() {
+    let runner = self.runner
+    let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    Task.detached(priority: .utility) {
+      let environments = Self.detectScriptEnvironments(runner: runner, shell: shell)
+      await MainActor.run { self.scriptEnvironments = environments }
+    }
+  }
+
+  private func applyRepositorySnapshot(_ snapshot: RepositorySnapshot) {
+    repositorySnapshot = snapshot
+    initializeRepositorySelectionIfNeeded(from: snapshot)
+    rebuildResolver()
+  }
+
+  private func scheduleSelectedRepositoryRefresh(after lastAttemptAt: Date?) {
+    repositoryRefreshTimer?.invalidate()
+    repositoryRefreshTimer = nil
+
+    let delay = RepositoryRefreshSchedule.delay(lastAttemptAt: lastAttemptAt, now: clock.now)
+    guard delay > 0 else {
+      refreshSelectedRepositories()
+      return
+    }
+    repositoryRefreshTimer = Timer.scheduledTimer(
+      withTimeInterval: delay, repeats: false
+    ) { [weak self] _ in
+      Task { @MainActor in self?.refreshSelectedRepositories() }
+    }
+  }
+
+  private func refreshSelectedRepositories() {
+    guard !isRefreshingIntegrations else { return }
+    isRefreshingIntegrations = true
+    repositoryError = nil
+    let provider = repositoryProvider
+    let selected = Set(settings.githubSelectedRepositories ?? [])
+    Task.detached(priority: .utility) {
+      do {
+        let result = try await provider.refreshSelectedRepositories(selected)
+        await MainActor.run {
+          self.applyRepositorySnapshot(result.snapshot)
+          self.repositoryError = result.failedRepositories.isEmpty
+            ? nil
+            : "部分已勾选仓库刷新失败，已保留缓存：\(result.failedRepositories.joined(separator: ", "))"
+          self.isRefreshingIntegrations = false
+          self.scheduleSelectedRepositoryRefresh(
+            after: result.snapshot.selectedRefreshAttemptedAt ?? self.clock.now)
+        }
+      } catch {
+        await MainActor.run {
+          self.repositoryError = Self.repositoryErrorMessage(error)
+          self.isRefreshingIntegrations = false
+          self.scheduleSelectedRepositoryRefresh(after: self.clock.now)
         }
       }
     }

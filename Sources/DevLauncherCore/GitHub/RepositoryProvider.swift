@@ -5,6 +5,15 @@ public enum RepositoryCachePolicy: Sendable {
   case reloadIgnoringCache
 }
 
+public enum RepositoryRefreshSchedule {
+  public static let interval: TimeInterval = 24 * 60 * 60
+
+  public static func delay(lastAttemptAt: Date?, now: Date) -> TimeInterval {
+    guard let lastAttemptAt else { return 0 }
+    return max(0, interval - now.timeIntervalSince(lastAttemptAt))
+  }
+}
+
 public struct GitHubRepository: Codable, Equatable, Sendable, Identifiable {
   public var nameWithOwner: String
   public var pushedAt: Date?
@@ -53,12 +62,16 @@ public struct RepositorySnapshot: Codable, Equatable, Sendable {
   public var accounts: [String]
   public var organizations: [GitHubOrganization]
   public var fetchedAt: Date
+  public var selectedRefreshAttemptedAt: Date?
+  public var selectedRefreshSucceededAt: Date?
 
   public init(
     repositories: [GitHubRepository],
     accounts: [String],
     organizations: [GitHubOrganization] = [],
     fetchedAt: Date,
+    selectedRefreshAttemptedAt: Date? = nil,
+    selectedRefreshSucceededAt: Date? = nil,
     metadataVersion: Int? = RepositorySnapshot.currentMetadataVersion
   ) {
     self.metadataVersion = metadataVersion
@@ -66,11 +79,26 @@ public struct RepositorySnapshot: Codable, Equatable, Sendable {
     self.accounts = accounts
     self.organizations = organizations
     self.fetchedAt = fetchedAt
+    self.selectedRefreshAttemptedAt = selectedRefreshAttemptedAt
+    self.selectedRefreshSucceededAt = selectedRefreshSucceededAt
+  }
+}
+
+public struct SelectedRepositoryRefreshResult: Equatable, Sendable {
+  public var snapshot: RepositorySnapshot
+  public var failedRepositories: [String]
+
+  public init(snapshot: RepositorySnapshot, failedRepositories: [String] = []) {
+    self.snapshot = snapshot
+    self.failedRepositories = failedRepositories
   }
 }
 
 public protocol RepositoryProvider: Sendable {
+  func cachedRepositories() -> RepositorySnapshot?
   func repositories(policy: RepositoryCachePolicy) async throws -> RepositorySnapshot
+  func refreshSelectedRepositories(_ names: Set<String>) async throws
+    -> SelectedRepositoryRefreshResult
 }
 
 public enum RepositoryProviderFailure: Error, Equatable, Sendable {
@@ -82,7 +110,7 @@ public enum RepositoryProviderFailure: Error, Equatable, Sendable {
 
 /// 通过本机 `gh` 获取当前可访问仓库。凭据只作为子进程环境变量使用，不进入缓存。
 public struct GitHubRepositoryProvider: RepositoryProvider {
-  public static let cacheLifetime: TimeInterval = 24 * 60 * 60
+  public static let cacheLifetime: TimeInterval = 7 * 24 * 60 * 60
   public static let accountQuery = """
     query {
       viewer {
@@ -118,6 +146,18 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
     }
     """
 
+  public static let selectedRepositoryQuery = """
+    query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        nameWithOwner
+        pushedAt
+        pullRequests(last: 1, orderBy: {field: CREATED_AT, direction: ASC}) {
+          nodes { number }
+        }
+      }
+    }
+    """
+
   private let runner: any CommandRunner
   private let fileSystem: any FileSystem
   private let clock: any Clock
@@ -139,6 +179,10 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
     self.cachePath = cachePath
   }
 
+  public func cachedRepositories() -> RepositorySnapshot? {
+    loadCache()
+  }
+
   public func repositories(policy: RepositoryCachePolicy) async throws -> RepositorySnapshot {
     let cached = loadCache()
     if policy == .useCache, let cached,
@@ -152,6 +196,117 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
     } catch {
       if let cached { return cached }
       throw error
+    }
+  }
+
+  public func refreshSelectedRepositories(_ names: Set<String>) async throws
+    -> SelectedRepositoryRefreshResult
+  {
+    let cached = loadCache()
+    let now = clock.now
+    var snapshot = cached ?? RepositorySnapshot(
+      repositories: [], accounts: [], fetchedAt: now)
+    snapshot.selectedRefreshAttemptedAt = now
+
+    let sortedNames = names.sorted()
+    guard !sortedNames.isEmpty else {
+      snapshot.selectedRefreshSucceededAt = now
+      snapshot.fetchedAt = now
+      try saveCache(snapshot)
+      return SelectedRepositoryRefreshResult(snapshot: snapshot)
+    }
+
+    do {
+      guard let gh = ghPathResolver.resolve() else {
+        throw RepositoryProviderFailure.ghUnavailable
+      }
+      let accounts = try authenticatedAccounts(gh: gh)
+      guard !accounts.isEmpty else {
+        throw RepositoryProviderFailure.authenticationUnavailable("GitHub CLI 尚未登录")
+      }
+      let contexts = try accounts.compactMap { account -> AccountContext? in
+        let tokenResult = try runner.run(
+          executable: gh,
+          arguments: ["auth", "token", "--hostname", account.host, "--user", account.login],
+          environment: nil,
+          timeoutSeconds: 20
+        )
+        let token = tokenResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard tokenResult.exitCode == 0, !token.isEmpty else { return nil }
+        return AccountContext(account: account, token: token)
+      }
+      guard !contexts.isEmpty else {
+        throw RepositoryProviderFailure.authenticationUnavailable("GitHub CLI 尚未返回可用凭据")
+      }
+
+      var updates: [String: GitHubRepository] = [:]
+      var failed: [String] = []
+      let cachedByName = Dictionary(uniqueKeysWithValues: snapshot.repositories.map {
+        ($0.nameWithOwner, $0)
+      })
+
+      for nameWithOwner in sortedNames {
+        let components = nameWithOwner.split(separator: "/", maxSplits: 1).map(String.init)
+        guard components.count == 2 else {
+          failed.append(nameWithOwner)
+          continue
+        }
+        let owner = components[0]
+        let name = components[1]
+        let existing = cachedByName[nameWithOwner]
+        let preferredAccountIDs = Set(existing?.accountIDs ?? [])
+        let preferredContexts = contexts.filter {
+          preferredAccountIDs.contains($0.account.id)
+        }
+        let eligibleContexts = preferredContexts.isEmpty ? contexts : preferredContexts
+
+        var refreshed: GitHubRepository?
+        for context in eligibleContexts {
+          guard let result = try? runner.run(
+            executable: gh,
+            arguments: [
+              "api", "graphql", "--hostname", context.account.host,
+              "-F", "owner=\(owner)", "-F", "name=\(name)",
+              "-f", "query=\(Self.selectedRepositoryQuery)",
+            ],
+            environment: ["GH_TOKEN": context.token, "GH_HOST": context.account.host],
+            timeoutSeconds: 30
+          ), result.exitCode == 0,
+            var repository = try? Self.parseSelectedRepository(result.stdout)
+          else { continue }
+
+          repository.ownerLogin = existing?.ownerLogin ?? owner
+          repository.ownerIsOrganization = existing?.ownerIsOrganization
+            ?? (owner.caseInsensitiveCompare(context.account.login) != .orderedSame)
+          repository.accountIDs = Array(
+            Set((existing?.accountIDs ?? []) + [context.account.id])
+          ).sorted()
+          refreshed = repository
+          break
+        }
+
+        if let refreshed {
+          updates[nameWithOwner] = refreshed
+        } else {
+          failed.append(nameWithOwner)
+        }
+      }
+
+      let existingNames = Set(snapshot.repositories.map(\.nameWithOwner))
+      snapshot.repositories = snapshot.repositories.map { updates[$0.nameWithOwner] ?? $0 }
+      snapshot.repositories.append(contentsOf: sortedNames.compactMap { name in
+        existingNames.contains(name) ? nil : updates[name]
+      })
+      if !updates.isEmpty { snapshot.fetchedAt = now }
+      if failed.isEmpty { snapshot.selectedRefreshSucceededAt = now }
+      try saveCache(snapshot)
+      return SelectedRepositoryRefreshResult(
+        snapshot: snapshot, failedRepositories: failed.sorted())
+    } catch {
+      guard cached != nil else { throw error }
+      try saveCache(snapshot)
+      return SelectedRepositoryRefreshResult(
+        snapshot: snapshot, failedRepositories: sortedNames)
     }
   }
 
@@ -229,7 +384,9 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
         if $0.accountID != $1.accountID { return $0.accountID < $1.accountID }
         return $0.login.localizedCaseInsensitiveCompare($1.login) == .orderedAscending
       },
-      fetchedAt: clock.now
+      fetchedAt: clock.now,
+      selectedRefreshAttemptedAt: clock.now,
+      selectedRefreshSucceededAt: clock.now
     )
     try saveCache(snapshot)
     return snapshot
@@ -239,6 +396,11 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
     var host: String
     var login: String
     var id: String { "\(login)@\(host)" }
+  }
+
+  private struct AccountContext {
+    var account: Account
+    var token: String
   }
 
   private struct AccountAPIResponse: Decodable {
@@ -329,6 +491,22 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
     var data: DataNode
   }
 
+  private struct SelectedRepositoryAPIResponse: Decodable {
+    struct DataNode: Decodable {
+      struct Repository: Decodable {
+        struct PullRequests: Decodable {
+          struct PullRequest: Decodable { var number: Int }
+          var nodes: [PullRequest]
+        }
+        var nameWithOwner: String
+        var pushedAt: Date?
+        var pullRequests: PullRequests
+      }
+      var repository: Repository?
+    }
+    var data: DataNode
+  }
+
   private struct LegacyAPIRepository: Decodable {
     var fullName: String
     var pushedAt: Date?
@@ -361,6 +539,23 @@ public struct GitHubRepositoryProvider: RepositoryProvider {
         }
       }
       throw RepositoryProviderFailure.malformedResponse("无法解析 gh 仓库与最新 PR 编号")
+    }
+  }
+
+  public static func parseSelectedRepository(_ output: String) throws -> GitHubRepository? {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    do {
+      guard let repository = try decoder.decode(
+        SelectedRepositoryAPIResponse.self, from: Data(output.utf8)
+      ).data.repository else { return nil }
+      return GitHubRepository(
+        nameWithOwner: repository.nameWithOwner,
+        pushedAt: repository.pushedAt,
+        latestPullRequestNumber: repository.pullRequests.nodes.last?.number
+      )
+    } catch {
+      throw RepositoryProviderFailure.malformedResponse("无法解析已勾选仓库的最新 PR 编号")
     }
   }
 

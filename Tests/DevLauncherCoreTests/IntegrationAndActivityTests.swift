@@ -2,7 +2,7 @@ import DevLauncherCore
 import Foundation
 import Testing
 
-@Test("GitHub provider 合并多账号、过滤归档仓库、去重并写入 24 小时缓存")
+@Test("GitHub provider 合并多账号、过滤归档仓库、去重并写入缓存")
 func repositoryProviderMultiAccountAndCache() async throws {
   let fs = FakeFileSystem()
   fs.markExecutable("/opt/homebrew/bin/gh")
@@ -80,6 +80,175 @@ func repositoryProviderUsesStaleCacheOnFailure() async throws {
     clock: FakeClock(now: Date(timeIntervalSince1970: 2_000_000_000)),
     loginShell: "/bin/zsh", cachePath: "/cache/repos.json")
   #expect(try await provider.repositories(policy: .useCache) == old)
+}
+
+@Test("GitHub 每日刷新 · 七天只标记陈旧，缓存仍可立即读取")
+func repositoryDailyRefreshReadsStaleCacheWithoutNetwork() throws {
+  let now = Date(timeIntervalSince1970: 2_000_000_000)
+  let fs = FakeFileSystem()
+  let old = RepositorySnapshot(
+    repositories: [GitHubRepository(nameWithOwner: "org/cached", latestPullRequestNumber: 7)],
+    accounts: ["alice@github.com"],
+    fetchedAt: now.addingTimeInterval(-(8 * 24 * 60 * 60))
+  )
+  try putRepositorySnapshot(old, in: fs)
+  let runner = FakeCommandRunner()
+  let provider = GitHubRepositoryProvider(
+    runner: runner, fileSystem: fs, clock: FakeClock(now: now),
+    loginShell: "/bin/zsh", cachePath: "/cache/repos.json")
+
+  #expect(GitHubRepositoryProvider.cacheLifetime == 7 * 24 * 60 * 60)
+  #expect(provider.cachedRepositories() == old)
+  #expect(runner.calls.isEmpty)
+}
+
+@Test("GitHub 每日刷新 · 未到二十四小时不运行，到期立即运行")
+func repositoryDailyRefreshScheduleUsesLastAttempt() {
+  let now = Date(timeIntervalSince1970: 2_000_000_000)
+  #expect(RepositoryRefreshSchedule.delay(lastAttemptAt: nil, now: now) == 0)
+  #expect(
+    RepositoryRefreshSchedule.delay(
+      lastAttemptAt: now.addingTimeInterval(-(23 * 60 * 60)), now: now) == 60 * 60)
+  #expect(
+    RepositoryRefreshSchedule.delay(
+      lastAttemptAt: now.addingTimeInterval(-(24 * 60 * 60)), now: now) == 0)
+}
+
+@Test("GitHub 每日刷新 · 只查询已勾选仓库并合并缓存")
+func repositoryDailyRefreshQueriesOnlySelectedRepositories() async throws {
+  let now = Date(timeIntervalSince1970: 2_000_000_000)
+  let oldSuccess = now.addingTimeInterval(-(2 * 24 * 60 * 60))
+  let fs = FakeFileSystem()
+  fs.markExecutable("/opt/homebrew/bin/gh")
+  let unselected = GitHubRepository(
+    nameWithOwner: "org/unselected", pushedAt: Date(timeIntervalSince1970: 10),
+    latestPullRequestNumber: 99, ownerLogin: "org", ownerIsOrganization: true,
+    accountIDs: ["alice@github.com"])
+  let snapshot = RepositorySnapshot(
+    repositories: [
+      GitHubRepository(
+        nameWithOwner: "org/selected", pushedAt: Date(timeIntervalSince1970: 20),
+        latestPullRequestNumber: 40, ownerLogin: "org", ownerIsOrganization: true,
+        accountIDs: ["alice@github.com"]),
+      unselected,
+    ],
+    accounts: ["alice@github.com"], fetchedAt: now.addingTimeInterval(-(8 * 24 * 60 * 60)),
+    selectedRefreshAttemptedAt: oldSuccess, selectedRefreshSucceededAt: oldSuccess)
+  try putRepositorySnapshot(snapshot, in: fs)
+
+  let runner = FakeCommandRunner()
+  stubGitHubAuthentication(runner)
+  runner.stub(
+    executable: "/opt/homebrew/bin/gh",
+    arguments: selectedRepositoryArguments(owner: "org", name: "selected"),
+    result: CommandResult(
+      stdout: #"{"data":{"repository":{"nameWithOwner":"org/selected","pushedAt":"2026-09-16T00:00:00Z","pullRequests":{"nodes":[{"number":42}]}}}}"#,
+      stderr: "", exitCode: 0))
+  let provider = GitHubRepositoryProvider(
+    runner: runner, fileSystem: fs, clock: FakeClock(now: now),
+    loginShell: "/bin/zsh", cachePath: "/cache/repos.json")
+
+  let result = try await provider.refreshSelectedRepositories(["org/selected"])
+
+  #expect(result.failedRepositories.isEmpty)
+  #expect(result.snapshot.repositories.first { $0.nameWithOwner == "org/selected" }?.latestPullRequestNumber == 42)
+  #expect(result.snapshot.repositories.first { $0.nameWithOwner == "org/unselected" } == unselected)
+  #expect(result.snapshot.selectedRefreshAttemptedAt == now)
+  #expect(result.snapshot.selectedRefreshSucceededAt == now)
+  #expect(runner.calls.contains { $0.arguments == selectedRepositoryArguments(owner: "org", name: "selected") })
+  #expect(runner.calls.contains { $0.arguments.contains("name=unselected") } == false)
+  #expect(runner.calls.contains { $0.arguments.contains("query=\(GitHubRepositoryProvider.repositoryQuery)") } == false)
+}
+
+@Test("GitHub 每日刷新 · 空选择不联网并记录成功")
+func repositoryDailyRefreshWithEmptySelectionDoesNotUseNetwork() async throws {
+  let now = Date(timeIntervalSince1970: 2_000_000_000)
+  let fs = FakeFileSystem()
+  let snapshot = RepositorySnapshot(
+    repositories: [GitHubRepository(nameWithOwner: "org/cached")],
+    accounts: ["alice@github.com"], fetchedAt: now.addingTimeInterval(-100))
+  try putRepositorySnapshot(snapshot, in: fs)
+  let runner = FakeCommandRunner()
+  let provider = GitHubRepositoryProvider(
+    runner: runner, fileSystem: fs, clock: FakeClock(now: now),
+    loginShell: "/bin/zsh", cachePath: "/cache/repos.json")
+
+  let result = try await provider.refreshSelectedRepositories([])
+
+  #expect(result.failedRepositories.isEmpty)
+  #expect(result.snapshot.repositories == snapshot.repositories)
+  #expect(result.snapshot.selectedRefreshAttemptedAt == now)
+  #expect(result.snapshot.selectedRefreshSucceededAt == now)
+  #expect(runner.calls.isEmpty)
+}
+
+@Test("GitHub 每日刷新 · 部分失败保留旧值且不前移成功时间")
+func repositoryDailyRefreshKeepsCachedValuesOnPartialFailure() async throws {
+  let now = Date(timeIntervalSince1970: 2_000_000_000)
+  let oldSuccess = now.addingTimeInterval(-(2 * 24 * 60 * 60))
+  let fs = FakeFileSystem()
+  fs.markExecutable("/opt/homebrew/bin/gh")
+  let snapshot = RepositorySnapshot(
+    repositories: [
+      GitHubRepository(
+        nameWithOwner: "org/works", latestPullRequestNumber: 10,
+        ownerLogin: "org", ownerIsOrganization: true, accountIDs: ["alice@github.com"]),
+      GitHubRepository(
+        nameWithOwner: "org/fails", latestPullRequestNumber: 20,
+        ownerLogin: "org", ownerIsOrganization: true, accountIDs: ["alice@github.com"]),
+    ],
+    accounts: ["alice@github.com"], fetchedAt: now.addingTimeInterval(-100),
+    selectedRefreshAttemptedAt: oldSuccess, selectedRefreshSucceededAt: oldSuccess)
+  try putRepositorySnapshot(snapshot, in: fs)
+
+  let runner = FakeCommandRunner()
+  stubGitHubAuthentication(runner)
+  runner.stub(
+    executable: "/opt/homebrew/bin/gh",
+    arguments: selectedRepositoryArguments(owner: "org", name: "works"),
+    result: CommandResult(
+      stdout: #"{"data":{"repository":{"nameWithOwner":"org/works","pushedAt":null,"pullRequests":{"nodes":[{"number":11}]}}}}"#,
+      stderr: "", exitCode: 0))
+  let provider = GitHubRepositoryProvider(
+    runner: runner, fileSystem: fs, clock: FakeClock(now: now),
+    loginShell: "/bin/zsh", cachePath: "/cache/repos.json")
+
+  let result = try await provider.refreshSelectedRepositories(["org/works", "org/fails"])
+
+  #expect(result.failedRepositories == ["org/fails"])
+  #expect(result.snapshot.repositories.first { $0.nameWithOwner == "org/works" }?.latestPullRequestNumber == 11)
+  #expect(result.snapshot.repositories.first { $0.nameWithOwner == "org/fails" }?.latestPullRequestNumber == 20)
+  #expect(result.snapshot.selectedRefreshAttemptedAt == now)
+  #expect(result.snapshot.selectedRefreshSucceededAt == oldSuccess)
+}
+
+private func putRepositorySnapshot(_ snapshot: RepositorySnapshot, in fileSystem: FakeFileSystem) throws {
+  let encoder = JSONEncoder()
+  encoder.dateEncodingStrategy = .iso8601
+  fileSystem.put(String(decoding: try encoder.encode(snapshot), as: UTF8.self), at: "/cache/repos.json")
+}
+
+private func stubGitHubAuthentication(_ runner: FakeCommandRunner) {
+  runner.stub(
+    executable: "/bin/zsh", arguments: ["-ilc", "command -v gh"],
+    result: CommandResult(stdout: "/opt/homebrew/bin/gh\n", stderr: "", exitCode: 0))
+  runner.stub(
+    executable: "/opt/homebrew/bin/gh", arguments: ["auth", "status", "--json", "hosts"],
+    result: CommandResult(
+      stdout: #"{"hosts":{"github.com":[{"state":"success","host":"github.com","login":"alice"}]}}"#,
+      stderr: "", exitCode: 0))
+  runner.stub(
+    executable: "/opt/homebrew/bin/gh",
+    arguments: ["auth", "token", "--hostname", "github.com", "--user", "alice"],
+    result: CommandResult(stdout: "token-alice\n", stderr: "", exitCode: 0))
+}
+
+private func selectedRepositoryArguments(owner: String, name: String) -> [String] {
+  [
+    "api", "graphql", "--hostname", "github.com",
+    "-F", "owner=\(owner)", "-F", "name=\(name)",
+    "-f", "query=\(GitHubRepositoryProvider.selectedRepositoryQuery)",
+  ]
 }
 
 @Test("仓库排序按最近选择、推送时间、名称三层稳定排列")
