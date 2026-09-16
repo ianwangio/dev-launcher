@@ -13,6 +13,10 @@ rather than working straight from a request.
 Nothing under `.rail/` is edited by hand; every state change goes through a
 command.
 
+`.rail/` is local workflow state and is ignored by Git. Keep it in the current
+checkout; do not copy it into public commits. In a new checkout, install and
+initialize `rail` locally before running a flow.
+
 ## 这个仓库
 
 macOS 原生应用，Swift + SwiftPM，无第三方依赖。上手看 [README.md](README.md)。

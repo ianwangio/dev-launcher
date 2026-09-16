@@ -4,7 +4,7 @@
 
 ## 1. 提交并审查源码
 
-先审查所有将公开的非忽略文件，包括 `.rail` 开发记录与本机路径；不要把 Keychain 凭据、API token 或构建出的 `dist/` 加入仓库。运行：
+先审查所有将公开的非忽略文件及本机路径；`.rail/` 是本地流程状态，已从公开 Git 历史移除并被 `.gitignore` 忽略，不应加入提交。也不要把 Keychain 凭据、API token 或构建出的 `dist/` 加入仓库。运行：
 
 ```bash
 swift test
@@ -15,7 +15,7 @@ git diff --cached --check
 git commit -m "release: prepare DevLauncher v0.1.0"
 ```
 
-提交后记下 `git rev-parse HEAD`。所有发布文档、脚本和用户要求的其他当前改动必须在这个提交里。若 agent 正在用 `rail` 记录执行状态，`.rail/rail.db` 可能在提交后再次变化；打包请从**该提交的干净隔离 checkout** 运行，不要让后续流程事件混入构建。提交与 Release 不替其他 `rail` 功能流程签名。
+提交后记下 `git rev-parse HEAD`。所有发布文档、脚本和用户要求的其他当前改动必须在这个提交里；本机 `.rail/` 状态保留但不进入 Git。打包请从**该提交的干净隔离 checkout** 运行，不要复制本机流程状态或把后续流程事件混入构建。提交与 Release 不替其他 `rail` 功能流程签名。
 
 ## 2. 从干净提交打包
 
@@ -82,3 +82,5 @@ codesign --verify --deep --strict DevLauncher.app
 - [Architect](https://github.com/forketyfork/architect) 对临时签名、未公证的 macOS 包给出单应用 `xattr -dr com.apple.quarantine` 首次运行命令。
 - [ContainerUI](https://github.com/kylemclaren/container-ui) 展示了 macOS 26 应用的版本标签、Release 资产、摘要和 Gatekeeper 说明；本仓库首版采用本机脚本与手动 `gh` 发布。
 - [GitHub CLI 发布命令](https://cli.github.com/manual/gh_release_create) 与 [Apple 的首次运行说明](https://support.apple.com/en-gb/102445) 用于核对发布语法和安全提示。
+
+公开 `main` 与版本标签不跟踪 `.rail/`。旧克隆若仍含清理前的提交或标签，应重新克隆或以新远端引用同步；不要把旧引用重新推回公开仓库。强推只清理本仓库的新可达历史，不能替别人清理克隆或保证 GitHub 旧 SHA 缓存立即消失。

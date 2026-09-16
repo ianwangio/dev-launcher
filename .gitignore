@@ -3,6 +3,9 @@
 .local/
 .rail-install-backup.*/
 
+# rail workflow state belongs to this local checkout, not public Git history
+/.rail/
+
 # Swift / Xcode
 .build/
 .swiftpm/
